@@ -1,7 +1,7 @@
 import asyncio
+from datetime import datetime, timedelta
 import logging
 import sqlite3
-from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -10,10 +10,10 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import LabeledPrice
 from openai import OpenAI
 
-# ЗАМЕНИТЕ ЭТИ СТРОКИ НА СВОИ ДАННЫЕ:
-TELEGRAM_TOKEN = "PUT_YOUR_KEY_HERE"
-OPENAI_API_KEY = "PUT_YOUR_KEY_HERE"
-ADMIN_ID = PUT_YOUR_KEY_HERE  # ВПИШИТЕ СЮДА СВОЙ ЧИСЛОВОЙ TELEGRAM ID ДЛЯ АДМИНКИ
+# ВАШИ ТОКЕНЫ И ID АДМИНИСТРАТОРА:
+TELEGRAM_TOKEN = "ВашТокен"
+OPENAI_API_KEY = "ВашАПИ"
+ADMIN_ID = 123456789
 
 # Стоимость продления сессии на 30 минут в Telegram Stars
 SESSION_STARS_PRICE = 550
@@ -40,7 +40,6 @@ users_sessions = {}
 def init_db():
   conn = sqlite3.connect("bot_users.db")
   cursor = conn.cursor()
-  # Таблица пользователей
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -50,7 +49,6 @@ def init_db():
             free_session_date TEXT
         )
     """)
-  # Таблица оплаченных сессий (история)
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS paid_sessions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -66,7 +64,6 @@ def save_user_start(user_id: int, username: str, first_name: str):
   conn = sqlite3.connect("bot_users.db")
   cursor = conn.cursor()
   now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  # Сохраняем пользователя, если его еще нет, или обновляем юзернейм
   cursor.execute(
       """
         INSERT INTO users (user_id, username, first_name, join_date) 
@@ -116,7 +113,6 @@ def get_all_users_report():
   report_data = []
   for u in users:
     u_id, uname, fname, j_date, f_date = u
-    # Получаем все платные сессии пользователя
     cursor.execute(
         "SELECT payment_date FROM paid_sessions WHERE user_id = ?", (u_id,)
     )
@@ -147,7 +143,6 @@ async def cmd_start(message: types.Message, state: FSMContext):
   )
   first_name = message.from_user.first_name or "Без имени"
 
-  # Сохраняем факт первого запуска в базу
   save_user_start(user_id, username, first_name)
 
   users_sessions[user_id] = {
@@ -215,7 +210,6 @@ async def start_free_session(callback: types.CallbackQuery, state: FSMContext):
   user_id = callback.from_user.id
   now = datetime.now()
 
-  # Фиксируем время старта бесплатной сессии в базе
   save_free_session_time(user_id)
 
   if user_id not in users_sessions:
@@ -238,6 +232,11 @@ async def start_free_session(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(SessionStates.chatting, F.text)
 async def handle_chat(message: types.Message, state: FSMContext):
   user_id = message.from_user.id
+  username = (
+      f"@{message.from_user.username}"
+      if message.from_user.username
+      else f"ID: {user_id}"
+  )
   user_data = users_sessions.get(
       user_id,
       {
@@ -251,31 +250,34 @@ async def handle_chat(message: types.Message, state: FSMContext):
     if datetime.now() > user_data["end_time"]:
       user_data["status"] = "expired"
 
-      pay_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
-          types.InlineKeyboardButton(
-              text="⭐️ Оплатить 30 минут (150 звезд)", callback_data="buy_session"
-          )
-      ]])
-
-      await message.answer(
-          "⏰ **Время нашей бесплатной сессии подошло к концу.**\nМы успели"
-          " наметить важные зоны для работы. Чтобы продолжить глубокую"
-          " проработку проблемы еще на 30 минут, пожалуйста, оплатите"
-          " продолжение сессии.",
-          reply_markup=pay_keyboard,
-          parse_mode="Markdown",
-      )
-      return
-
+  # ЕСЛИ ВРЕМЯ ИСТЕКЛО: Блокируем ИИ и просим оплатить
   if user_data.get("status") == "expired":
+    pay_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
+        types.InlineKeyboardButton(
+            text="⭐️ Оплатить 30 минут (550 звезд)", callback_data="buy_session"
+        )
+    ]])
     await message.answer(
-        "Пожалуйста, оплатите продолжение сессии через кнопку выше, чтобы мы"
-        " могли продолжить разговор."
+        "⏰ **Время нашей бесплатной сессии подошло к концу.**\nЧтобы"
+        " продолжить глубокую проработку проблемы и общение с психологом,"
+        " пожалуйста, оплатите продление сессии.",
+        reply_markup=pay_keyboard,
+        parse_mode="Markdown",
     )
     return
 
-  # Добавляем сообщение пользователя в историю (сохраняем контекст)
+  # Добавляем сообщение пользователя в историю (если сессия активна)
   user_data["history"].append({"role": "user", "content": message.text})
+
+  # 🔔 ПЕРЕСЫЛКА СООБЩЕНИЯ КЛИЕНТА АДМИНУ
+  try:
+    await bot.send_message(
+        ADMIN_ID,
+        f"📩 **Сообщение от пользователя {username}:**\n{message.text}",
+        parse_mode="Markdown",
+    )
+  except Exception:
+    pass
 
   try:
     response = client.chat.completions.create(
@@ -283,6 +285,17 @@ async def handle_chat(message: types.Message, state: FSMContext):
     )
     ai_reply = response.choices[0].message.content
     user_data["history"].append({"role": "assistant", "content": ai_reply})
+
+    # 🤖 ПЕРЕСЫЛКА ОТВЕТА БОТА АДМИНУ
+    try:
+      await bot.send_message(
+          ADMIN_ID,
+          f"🧠 **Ответ психолога пользователю {username}:**\n{ai_reply}",
+          parse_mode="Markdown",
+      )
+    except Exception:
+      pass
+
     await message.answer(ai_reply)
   except Exception as e:
     await message.answer(
@@ -294,7 +307,11 @@ async def handle_chat(message: types.Message, state: FSMContext):
 # --- ЛОГИКА ОПЛАТЫ ЧЕРЕЗ TELEGRAM STARS ---
 @dp.callback_query(F.data == "buy_session")
 async def process_buy_session(callback: types.CallbackQuery):
-  prices = [LabeledPrice(label="Психологическая сессия 30 мин", amount=SESSION_STARS_PRICE)]
+  prices = [
+      LabeledPrice(
+          label="Психологическая сессия 30 мин", amount=SESSION_STARS_PRICE
+      )
+  ]
   await callback.message.answer_invoice(
       title="Продление сессии",
       description="Продолжение глубокой психологической проработки на 30 минут",
@@ -316,7 +333,7 @@ async def pre_checkout_query_handler(pre_checkout_query: types.PreCheckoutQuery)
 @dp.message(F.successful_payment)
 async def successful_payment_handler(message: types.Message):
   user_id = message.from_user.id
-  
+
   # Логируем платную сессию в базу данных
   log_paid_session(user_id)
 
@@ -325,7 +342,6 @@ async def successful_payment_handler(message: types.Message):
         "history": [{"role": "system", "content": SYSTEM_PROMPT}]
     }
 
-  # Продлеваем сессию на 30 минут, не удаляя историю диалога (контекст сохраняется)
   users_sessions[user_id]["status"] = "paid"
   users_sessions[user_id]["end_time"] = datetime.now() + timedelta(minutes=30)
 
