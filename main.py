@@ -11,7 +11,7 @@ from aiogram.types import LabeledPrice
 from openai import OpenAI
 
 # ВАШИ ТОКЕНЫ И ID АДМИНИСТРАТОРА:
-TELEGRAM_TOKEN = "ВашТокен"
+TELEGRAM_TOKEN = "TELEGRAM_TOKEN"
 OPENAI_API_KEY = "ВашАПИ"
 ADMIN_ID = 123456789
 
