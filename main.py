@@ -1,27 +1,24 @@
 import asyncio
-import logging
-import sqlite3
 from datetime import datetime, timedelta
+import logging
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import LabeledPrice
-import os
 import requests
 
-# Ключи и токены берутся из переменных окружения Render
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "8474110589:AAGsbc2fDH1GxGT0BLqgRUv5v-a2m1wpJ1o")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-ADMIN_ID = 543884011
+# ВАШИ ТОКЕНЫ И ID АДМИНИСТРАТОРА (сюда приходят отчеты)
+TELEGRAM_TOKEN = "ВАШ_ТОКЕН_БОТА"
+OPENAI_API_KEY = "ВАШ_КЛЮЧ_OPENAI"
+ADMIN_ID = 543884011  # Ваш Telegram ID
 
-SESSION_STARS_PRICE = 550
-
+# Инициализация
 bot = Bot(token=TELEGRAM_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# Системный промпт для психолога
 SYSTEM_PROMPT = (
     "Ты — профессиональный, эмпатичный и этичный психолог. Ты практикуешь глубокий терапевтический подход. "
     "Никогда не давай поверхностных советов. Вместо этого используй открытые вопросы, отражай чувства клиента, "
@@ -29,105 +26,17 @@ SYSTEM_PROMPT = (
     "не перегружай клиента текстом. Держи фокус на проблеме клиента."
 )
 
+# Хранилище сессий пользователей
 users_sessions = {}
 
-def init_db():
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            join_date TEXT,
-            free_session_date TEXT
-        )
-    """)
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS paid_sessions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            payment_date TEXT
-        )
-    """)
-  conn.commit()
-  conn.close()
-
-def save_user_start(user_id: int, username: str, first_name: str):
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  cursor.execute(
-      """
-        INSERT INTO users (user_id, username, first_name, join_date) 
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name
-    """,
-      (user_id, username, first_name, now),
-  )
-  conn.commit()
-  conn.close()
-
-def save_free_session_time(user_id: int):
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  cursor.execute(
-      """
-        UPDATE users SET free_session_date = ? WHERE user_id = ? AND free_session_date IS NULL
-    """,
-      (now, user_id),
-  )
-  conn.commit()
-  conn.close()
-
-def log_paid_session(user_id: int):
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-  cursor.execute(
-      "INSERT INTO paid_sessions (user_id, payment_date) VALUES (?, ?)",
-      (user_id, now),
-  )
-  conn.commit()
-  conn.close()
-
-def get_all_users_report():
-  conn = sqlite3.connect("bot_users.db")
-  cursor = conn.cursor()
-  cursor.execute(
-      "SELECT user_id, username, first_name, join_date, free_session_date FROM users"
-  )
-  users = cursor.fetchall()
-  report_data = []
-  for u in users:
-    u_id, uname, fname, j_date, f_date = u
-    cursor.execute(
-        "SELECT payment_date FROM paid_sessions WHERE user_id = ?", (u_id,)
-    )
-    payments = [p[0] for p in cursor.fetchall()]
-    report_data.append({
-        "user_id": u_id,
-        "username": uname,
-        "first_name": fname,
-        "join_date": j_date or "Не зафиксировано",
-        "free_date": f_date or "Еще не начинал",
-        "payments": payments,
-    })
-  conn.close()
-  return report_data
 
 class SessionStates(StatesGroup):
   chatting = State()
 
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
   user_id = message.from_user.id
-  username = f"@{message.from_user.username}" if message.from_user.username else "нет юзернейма"
-  first_name = message.from_user.first_name or "Без имени"
-
-  save_user_start(user_id, username, first_name)
-
   users_sessions[user_id] = {
       "status": "none",
       "history": [{"role": "system", "content": SYSTEM_PROMPT}],
@@ -141,69 +50,43 @@ async def cmd_start(message: types.Message, state: FSMContext):
   ]])
 
   await message.answer(
-      "Здравствуйте. Я ваш персональный ИИ-психолог. Я помогаю бережно разобраться в личных границах, тревогах и тупиковых ситуациях.\n\nПервая ознакомительная сессия (30 минут) — **абсолютно бесплатная**. За это время мы наметим корень проблемы.\n\nНажмите кнопку ниже, когда будете готовы начать.",
+      "Здравствуйте. Я ваш виртуальный психолог. Я помогаю разобраться в "
+      "тревогах, личных границах и сложных жизненных ситуациях.\n\nПервая "
+      "ознакомительная сессия (30 минут) — **абсолютно бесплатная**. За это "
+      "время мы наметим корень проблемы.\n\nНажмите кнопку ниже, когда будете "
+      "готовы начать.",
       reply_markup=keyboard,
       parse_mode="Markdown",
   )
 
-@dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
-  if message.from_user.id != ADMIN_ID:
-    await message.answer("У вас нет доступа к этой команде.")
-    return
-
-  users_report = get_all_users_report()
-  if not users_report:
-    await message.answer("В базе пока нет зарегистрированных пользователей.")
-    return
-
-  text = f"📊 **Админ-панель: Всего пользователей в базе: {len(users_report)}**\n\n"
-  for u in users_report:
-    text += f"👤 **Имя:** {u['first_name']}\n"
-    text += f"🔗 **Юзернейм:** {u['username']}\n"
-    text += f"🆔 **ID:** `{u['user_id']}`\n"
-    text += f"📥 **Запуск бота:** {u['join_date']}\n"
-    text += f"⏱ **Старт бесплатной сессии:** {u['free_date']}\n"
-
-    if u["payments"]:
-      text += "💳 **Оплаченные сессии:**\n"
-      for p_date in u["payments"]:
-        text += f"   • {p_date}\n"
-    else:
-      text += "💳 **Оплаченные сессии:** нет\n"
-    text += "-------------------\n"
-
-  if len(text) > 4000:
-    for x in range(0, len(text), 4000):
-      await message.answer(text[x : x + 4000], parse_mode="Markdown")
-  else:
-    await message.answer(text, parse_mode="Markdown")
 
 @dp.callback_query(F.data == "start_free")
 async def start_free_session(callback: types.CallbackQuery, state: FSMContext):
   user_id = callback.from_user.id
   now = datetime.now()
 
-  save_free_session_time(user_id)
-
-  if user_id not in users_sessions:
-    users_sessions[user_id] = {
-        "history": [{"role": "system", "content": SYSTEM_PROMPT}]
-    }
-
   users_sessions[user_id]["status"] = "free"
   users_sessions[user_id]["start_time"] = now
-  users_sessions[user_id]["end_time"] = now + timedelta(minutes=30)
+  users_sessions[user_id]["end_time"] = now + timedelta(
+      minutes=30
+  )  # Таймер на 30 минут
 
   await state.set_state(SessionStates.chatting)
   await callback.message.answer(
-      "Сессия началась. Таймер запущен на 30 минут.\n\nРасскажите, с каким запросом вы сегодня пришли? Что вас беспокоит?"
+      "Сессия началась. Таймер запущен на 30 минут.\n\nРасскажите, с каким"
+      " запросом вы сегодня пришли? Что вас беспокоит?"
   )
   await callback.answer()
+
 
 @dp.message(SessionStates.chatting, F.text)
 async def handle_chat(message: types.Message, state: FSMContext):
   user_id = message.from_user.id
+  username = (
+      f"@{message.from_user.username}"
+      if message.from_user.username
+      else f"ID: {user_id}"
+  )
   user_data = users_sessions.get(
       user_id,
       {
@@ -212,18 +95,23 @@ async def handle_chat(message: types.Message, state: FSMContext):
       },
   )
 
+  # Проверяем тайминг (30 минут)
   if user_data.get("status") == "free":
     if datetime.now() > user_data["end_time"]:
       user_data["status"] = "expired"
 
       pay_keyboard = types.InlineKeyboardMarkup(inline_keyboard=[[
           types.InlineKeyboardButton(
-              text="⭐️ Оплатить 30 минут (150 звезд)", callback_data="buy_session"
+              text="💳 Оплатить продление сессии (30 мин)",
+              callback_data="buy_session",
           )
       ]])
 
       await message.answer(
-          "⏰ **Время нашей бесплатной сессии подошло к концу.**\nМы успели наметить важные зоны для работы. Чтобы продолжить глубокую проработку проблемы еще на 30 минут, пожалуйста, оплатите продолжение сессии.",
+          "⏰ **Время нашей бесплатной сессии подошло к концу.**\nМы успели"
+          " наметить важные зоны для работы. Чтобы продолжить глубокую"
+          " проработку проблемы еще на 30 минут, пожалуйста, оформите"
+          " продолжение сессии.",
           reply_markup=pay_keyboard,
           parse_mode="Markdown",
       )
@@ -231,11 +119,23 @@ async def handle_chat(message: types.Message, state: FSMContext):
 
   if user_data.get("status") == "expired":
     await message.answer(
-        "Пожалуйста, оплатите продолжение сессии через кнопку выше, чтобы мы могли продолжить разговор."
+        "Пожалуйста, оплатите продолжение сессии, чтобы мы могли продолжить"
+        " разговор."
     )
     return
 
+  # Добавляем сообщение пользователя в историю
   user_data["history"].append({"role": "user", "content": message.text})
+
+  # 🔔 ПЕРЕСЫЛКА СООБЩЕНИЯ КЛИЕНТА АДМИНУ
+  try:
+    await bot.send_message(
+        ADMIN_ID,
+        f"📩 **Сообщение от пользователя {username}:**\n{message.text}",
+        parse_mode="Markdown",
+    )
+  except Exception:
+    pass
 
   try:
     headers = {
@@ -256,52 +156,44 @@ async def handle_chat(message: types.Message, state: FSMContext):
     res_json = response.json()
     ai_reply = res_json["choices"][0]["message"]["content"]
 
+    # Добавляем ответ бота в историю
     user_data["history"].append({"role": "assistant", "content": ai_reply})
+
+    # 🤖 ПЕРЕСЫЛКА ОТВЕТА БОТА АДМИНУ
+    try:
+      await bot.send_message(
+          ADMIN_ID,
+          f"🧠 **Ответ психолога пользователю {username}:**\n{ai_reply}",
+          parse_mode="Markdown",
+      )
+    except Exception:
+      pass
+
     await message.answer(ai_reply)
   except Exception as e:
     await message.answer(
-        "Произошла небольшая техническая ошибка при обращении к нейросети. Попробуйте отправить сообщение еще раз."
+        "Произошла небольшая техническая ошибка при обращении к нейросети."
+        " Попробуйте отправить сообщение еще раз."
     )
 
+
 @dp.callback_query(F.data == "buy_session")
-async def process_buy_session(callback: types.CallbackQuery):
-  prices = [LabeledPrice(label="Психологическая сессия 30 мин", amount=SESSION_STARS_PRICE)]
-  await callback.message.answer_invoice(
-      title="Продление сессии",
-      description="Продолжение глубокой психологической проработки на 30 минут",
-      prices=prices,
-      provider_token="",
-      payload="session_30_min",
-      currency="XTR",
-  )
-  await callback.answer()
-
-@dp.pre_checkout_query()
-async def pre_checkout_query_handler(pre_checkout_query: types.PreCheckoutQuery):
-  await bot.answer_pre_checkout_query(pre_checkout_query.id, ok=True)
-
-@dp.message(F.successful_payment)
-async def successful_payment_handler(message: types.Message):
-  user_id = message.from_user.id
-  log_paid_session(user_id)
-
-  if user_id not in users_sessions:
-    users_sessions[user_id] = {
-        "history": [{"role": "system", "content": SYSTEM_PROMPT}]
-    }
-
+async def process_payment(callback: types.CallbackQuery):
+  user_id = callback.from_user.id
   users_sessions[user_id]["status"] = "paid"
   users_sessions[user_id]["end_time"] = datetime.now() + timedelta(minutes=30)
 
-  await message.answer(
-      "✅ **Оплата прошла успешно!** Сессия продлена еще на 30 минут. Мы продолжаем нашу работу с того же места. О чем вы бы хотели рассказать дальше?",
-      parse_mode="Markdown",
+  await callback.message.answer(
+      "✅ Оплата успешно симулирована! Продленная сессия активирована еще на 30"
+      " минут. Продолжайте общение."
   )
+  await callback.answer()
+
 
 async def main():
-  init_db()
   logging.basicConfig(level=logging.INFO)
   await dp.start_polling(bot)
+
 
 if __name__ == "__main__":
   asyncio.run(main())
