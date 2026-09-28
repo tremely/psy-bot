@@ -1,10 +1,8 @@
 import asyncio
 import logging
 import os
-import smtplib
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from email.message import EmailMessage
 
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.filters import Command
@@ -29,14 +27,6 @@ PRICE_30 = 500
 
 # AI
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o")
-
-# Email. Configure these environment variables on the hosting.
-SMTP_HOST = os.getenv("SMTP_HOST", "")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
-SMTP_USER = os.getenv("SMTP_USER", "")
-SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
-SMTP_FROM = os.getenv("SMTP_FROM", SMTP_USER)
-SUPPORT_EMAIL = "support@psytrem.com"
 
 DB_PATH = os.getenv("DB_PATH", "bot_users.db")
 
@@ -72,7 +62,7 @@ SYSTEM_PROMPT = """
 - если человек просто хочет выговориться, не превращай каждый ответ
   в диагностику;
 - не ставь диагнозы и не утверждай, что знаешь внутреннее состояние
-- человека лучше него самого;
+  человека лучше него самого;
 - не называй себя человеком или лицензированным психологом.
 
 Структура хорошего ответа может быть такой:
@@ -100,7 +90,7 @@ class SessionStates(StatesGroup):
 
 
 # ============================================================
-# DATABASE (с безопасным управлением через контекстные менеджеры)
+# DATABASE
 # ============================================================
 def init_db():
     with sqlite3.connect(DB_PATH) as conn:
@@ -118,7 +108,6 @@ def init_db():
             )
         """)
 
-        # Migration from the original bot schema.
         cur.execute("PRAGMA table_info(users)")
         existing_columns = {row[1] for row in cur.fetchall()}
 
@@ -394,7 +383,7 @@ def payment_keyboard():
 
 
 # ============================================================
-# EMAIL
+# NOTIFICATIONS TO ADMIN (TELEGRAM)
 # ============================================================
 def build_transcript(user_id):
     user = get_user(user_id)
@@ -417,31 +406,27 @@ def build_transcript(user_id):
     return "\n".join(lines)
 
 
-def send_transcript_email(user_id, subject_suffix="завершение сессии"):
-    if not SMTP_HOST or not SMTP_USER or not SMTP_PASSWORD:
-        logging.warning("SMTP is not configured; transcript email was not sent.")
-        return False
-
+async def send_transcript_to_admin(user_id, subject_suffix="завершение сессии"):
+    """Отправляет транскрипт диалога администратору в Telegram."""
     try:
-        msg = EmailMessage()
-        msg["Subject"] = f"psyTrem — {subject_suffix} — Telegram {user_id}"
-        msg["From"] = SMTP_FROM
-        msg["To"] = SUPPORT_EMAIL
-        msg.set_content(build_transcript(user_id))
+        transcript_text = build_transcript(user_id)
+        user = get_user(user_id)
+        user_name = user['first_name'] if user else 'Неизвестен'
+        
+        header = f"📬 **Транскрипт сессии**\nПользователь: {user_name} (ID: `{user_id}`)\nСтатус: {subject_suffix}\n\n"
+        full_message = header + transcript_text
 
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=20) as server:
-            server.starttls()
-            server.login(SMTP_USER, SMTP_PASSWORD)
-            server.send_message(msg)
+        # Разбиваем сообщение, если оно превышает лимит Telegram (4096 символов)
+        if len(full_message) <= 4096:
+            await bot.send_message(ADMIN_ID, full_message, parse_mode="Markdown")
+        else:
+            for i in range(0, len(full_message), 4000):
+                await bot.send_message(ADMIN_ID, full_message[i:i+4000])
 
         return True
     except Exception:
-        logging.exception("Could not send transcript email")
+        logging.exception("Could not send transcript to admin Telegram")
         return False
-
-
-async def send_transcript_email_async(user_id, subject_suffix="завершение сессии"):
-    await asyncio.to_thread(send_transcript_email, user_id, subject_suffix)
 
 
 # ============================================================
@@ -622,7 +607,8 @@ async def handle_chat(message: types.Message, state: FSMContext):
 
     if not remaining:
         await state.clear()
-        await send_transcript_email_async(
+        # Отправка транскрипта админу в Telegram
+        await send_transcript_to_admin(
             user_id, "сессия завершена — транскрипт"
         )
         await message.answer(
@@ -639,12 +625,7 @@ async def handle_chat(message: types.Message, state: FSMContext):
 
     save_message(user_id, "user", text)
 
-    # Защищенное формирование истории для OpenAI API:
-    # 1. Загружаем последние 40 сообщений
     recent_history = load_history(user_id)[-40:]
-
-    # 2. Убеждаемся, что первое сообщение в истории имеет роль 'user',
-    # чтобы избежать ошибки 400 со стороны API.
     while recent_history and recent_history[0]["role"] != "user":
         recent_history.pop(0)
 
@@ -792,7 +773,8 @@ async def successful_payment_handler(message: types.Message, state: FSMContext):
         parse_mode="Markdown",
     )
 
-    await send_transcript_email_async(
+    # Отправка транскрипта админу в Telegram при успешной оплате
+    await send_transcript_to_admin(
         user_id, f"успешная оплата — {minutes} минут"
     )
 
