@@ -108,8 +108,7 @@ def init_db():
                 join_date TEXT NOT NULL,
                 free_session_start TEXT,
                 session_end TEXT,
-                session_type TEXT DEFAULT 'none',
-                transcript_sent INTEGER DEFAULT 1
+                session_type TEXT DEFAULT 'none'
             )
         """)
 
@@ -132,9 +131,6 @@ def init_db():
             cur.execute(
                 "ALTER TABLE users ADD COLUMN session_type TEXT DEFAULT 'none'"
             )
-
-        if "transcript_sent" not in existing_columns:
-            cur.execute("ALTER TABLE users ADD COLUMN transcript_sent INTEGER DEFAULT 1")
 
         cur.execute("""
             CREATE TABLE IF NOT EXISTS payments (
@@ -210,7 +206,7 @@ def start_free_session_db(user_id):
         cur = conn.cursor()
         cur.execute("""
             UPDATE users
-            SET free_session_start=?, session_end=?, session_type='free', transcript_sent=0
+            SET free_session_start=?, session_end=?, session_type='free'
             WHERE user_id=? AND free_session_start IS NULL
         """, (start.isoformat(), end.isoformat(), user_id))
         conn.commit()
@@ -241,7 +237,7 @@ def set_session(user_id, minutes, session_type):
         cur = conn.cursor()
         cur.execute("""
             UPDATE users
-            SET session_end=?, session_type=?, transcript_sent=0
+            SET session_end=?, session_type=?
             WHERE user_id=?
         """, (end.isoformat(), session_type, user_id))
         conn.commit()
@@ -424,6 +420,7 @@ async def send_transcript_to_admin(user_id, subject_suffix="завершение
         header = f"📬 **Транскрипт сессии**\nПользователь: {user_name} (ID: `{user_id}`)\nСтатус: {subject_suffix}\n\n"
         full_message = header + transcript_text
 
+        # Разбиваем сообщение, если оно превышает лимит Telegram (4096 символов)
         if len(full_message) <= 4096:
             await bot.send_message(ADMIN_ID, full_message, parse_mode="Markdown")
         else:
@@ -434,48 +431,6 @@ async def send_transcript_to_admin(user_id, subject_suffix="завершение
     except Exception:
         logging.exception("Could not send transcript to admin Telegram")
         return False
-
-
-# ============================================================
-# BACKGROUND TASK (CHECK EXPIRED SESSIONS)
-# ============================================================
-async def check_expired_sessions():
-    """Фоновая задача: проверяет истекшие сессии и отправляет транскрипты админу каждые 30 минут."""
-    while True:
-        try:
-            now = now_iso()
-            with sqlite3.connect(DB_PATH) as conn:
-                cur = conn.cursor()
-                cur.execute("""
-                    SELECT user_id FROM users
-                    WHERE session_end IS NOT NULL 
-                      AND session_end <= ? 
-                      AND transcript_sent = 0
-                """, (now,))
-                expired_users = cur.fetchall()
-
-            for (user_id,) in expired_users:
-                await send_transcript_to_admin(user_id, "время сессии истекло")
-                
-                with sqlite3.connect(DB_PATH) as conn:
-                    cur = conn.cursor()
-                    cur.execute("""
-                        UPDATE users
-                        SET transcript_sent = 1, session_type = 'none'
-                        WHERE user_id = ?
-                    """, (user_id,))
-                    conn.commit()
-
-                try:
-                    await storage.set_state(bot=bot, key=types.StorageKey(bot_id=bot.id, chat_id=user_id, user_id=user_id), state=None)
-                except Exception:
-                    pass
-
-        except Exception:
-            logging.exception("Error in check_expired_sessions background task")
-
-        # Проверяем каждые 30 минут (1800 секунд)
-        await asyncio.sleep(1800)
 
 
 # ============================================================
@@ -528,6 +483,7 @@ def get_all_user_ids():
 
 
 async def broadcast_message(text):
+    """Отправляет сообщение всем пользователям, сохранённым в базе."""
     user_ids = get_all_user_ids()
     sent = 0
     failed = 0
@@ -540,6 +496,7 @@ async def broadcast_message(text):
             failed += 1
             logging.exception("Broadcast failed for user %s", user_id)
 
+        # Небольшая пауза, чтобы не упираться в лимиты Telegram.
         await asyncio.sleep(0.05)
 
     return len(user_ids), sent, failed
@@ -744,6 +701,7 @@ async def handle_chat(message: types.Message, state: FSMContext):
 
     if not remaining:
         await state.clear()
+        # Отправка транскрипта админу в Telegram
         await send_transcript_to_admin(
             user_id, "сессия завершена — транскрипт"
         )
@@ -909,6 +867,7 @@ async def successful_payment_handler(message: types.Message, state: FSMContext):
         parse_mode="Markdown",
     )
 
+    # Отправка транскрипта админу в Telegram при успешной оплате
     await send_transcript_to_admin(
         user_id, f"успешная оплата — {minutes} минут"
     )
@@ -923,10 +882,6 @@ async def main():
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
     init_db()
-    
-    # Запускаем фоновую проверку истекших сессий (каждые 30 минут)
-    asyncio.create_task(check_expired_sessions())
-    
     logging.info("psyTrem bot started")
     await dp.start_polling(bot)
 
