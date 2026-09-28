@@ -72,7 +72,7 @@ SYSTEM_PROMPT = """
 - если человек просто хочет выговориться, не превращай каждый ответ
   в диагностику;
 - не ставь диагнозы и не утверждай, что знаешь внутреннее состояние
-  человека лучше него самого;
+- человека лучше него самого;
 - не называй себя человеком или лицензированным психологом.
 
 Структура хорошего ответа может быть такой:
@@ -100,73 +100,67 @@ class SessionStates(StatesGroup):
 
 
 # ============================================================
-# DATABASE
+# DATABASE (с безопасным управлением через контекстные менеджеры)
 # ============================================================
-def db():
-    return sqlite3.connect(DB_PATH)
-
-
 def init_db():
-    conn = db()
-    cur = conn.cursor()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT,
-            first_name TEXT,
-            join_date TEXT NOT NULL,
-            free_session_start TEXT,
-            session_end TEXT,
-            session_type TEXT DEFAULT 'none'
-        )
-    """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id INTEGER PRIMARY KEY,
+                username TEXT,
+                first_name TEXT,
+                join_date TEXT NOT NULL,
+                free_session_start TEXT,
+                session_end TEXT,
+                session_type TEXT DEFAULT 'none'
+            )
+        """)
 
-    # Migration from the original bot schema.
-    cur.execute("PRAGMA table_info(users)")
-    existing_columns = {row[1] for row in cur.fetchall()}
+        # Migration from the original bot schema.
+        cur.execute("PRAGMA table_info(users)")
+        existing_columns = {row[1] for row in cur.fetchall()}
 
-    if "free_session_start" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN free_session_start TEXT")
-        if "free_session_date" in existing_columns:
-            cur.execute("""
-                UPDATE users
-                SET free_session_start = free_session_date
-                WHERE free_session_start IS NULL
-            """)
+        if "free_session_start" not in existing_columns:
+            cur.execute("ALTER TABLE users ADD COLUMN free_session_start TEXT")
+            if "free_session_date" in existing_columns:
+                cur.execute("""
+                    UPDATE users
+                    SET free_session_start = free_session_date
+                    WHERE free_session_start IS NULL
+                """)
 
-    if "session_end" not in existing_columns:
-        cur.execute("ALTER TABLE users ADD COLUMN session_end TEXT")
+        if "session_end" not in existing_columns:
+            cur.execute("ALTER TABLE users ADD COLUMN session_end TEXT")
 
-    if "session_type" not in existing_columns:
-        cur.execute(
-            "ALTER TABLE users ADD COLUMN session_type TEXT DEFAULT 'none'"
-        )
+        if "session_type" not in existing_columns:
+            cur.execute(
+                "ALTER TABLE users ADD COLUMN session_type TEXT DEFAULT 'none'"
+            )
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS payments (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            telegram_payment_charge_id TEXT,
-            payload TEXT NOT NULL,
-            stars INTEGER NOT NULL,
-            minutes INTEGER NOT NULL,
-            payment_date TEXT NOT NULL
-        )
-    """)
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS payments (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                telegram_payment_charge_id TEXT,
+                payload TEXT NOT NULL,
+                stars INTEGER NOT NULL,
+                minutes INTEGER NOT NULL,
+                payment_date TEXT NOT NULL
+            )
+        """)
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            role TEXT NOT NULL,
-            content TEXT NOT NULL,
-            created_at TEXT NOT NULL
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        conn.commit()
 
 
 def now_iso():
@@ -180,26 +174,25 @@ def parse_dt(value):
 
 
 def save_user_start(user_id, username, first_name):
-    conn = db()
-    cur = conn.cursor()
-    now = now_iso()
-    cur.execute("""
-        INSERT INTO users (user_id, username, first_name, join_date)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(user_id) DO UPDATE SET
-            username=excluded.username,
-            first_name=excluded.first_name
-    """, (user_id, username, first_name, now))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        now = now_iso()
+        cur.execute("""
+            INSERT INTO users (user_id, username, first_name, join_date)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username=excluded.username,
+                first_name=excluded.first_name
+        """, (user_id, username, first_name, now))
+        conn.commit()
 
 
 def get_user(user_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+        row = cur.fetchone()
+    
     if not row:
         return None
     return {
@@ -216,26 +209,24 @@ def get_user(user_id):
 def start_free_session_db(user_id):
     start = datetime.now(timezone.utc)
     end = start + timedelta(minutes=15)
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE users
-        SET free_session_start=?, session_end=?, session_type='free'
-        WHERE user_id=? AND free_session_start IS NULL
-    """, (start.isoformat(), end.isoformat(), user_id))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE users
+            SET free_session_start=?, session_end=?, session_type='free'
+            WHERE user_id=? AND free_session_start IS NULL
+        """, (start.isoformat(), end.isoformat(), user_id))
+        conn.commit()
     return start, end
 
 
 def has_used_free_session(user_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT free_session_start FROM users WHERE user_id=?", (user_id,)
-    )
-    row = cur.fetchone()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT free_session_start FROM users WHERE user_id=?", (user_id,)
+        )
+        row = cur.fetchone()
     return bool(row and row[0])
 
 
@@ -243,114 +234,106 @@ def set_session(user_id, minutes, session_type):
     current = get_user(user_id)
     now = datetime.now(timezone.utc)
 
-    # Если человек покупает продолжение пока предыдущая сессия ещё идёт,
-    # добавляем время к текущему окончанию. Иначе начинаем с текущего момента.
     current_end = parse_dt(current["session_end"]) if current else None
     if current_end and current_end > now:
         end = current_end + timedelta(minutes=minutes)
     else:
         end = now + timedelta(minutes=minutes)
 
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        UPDATE users
-        SET session_end=?, session_type=?
-        WHERE user_id=?
-    """, (end.isoformat(), session_type, user_id))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            UPDATE users
+            SET session_end=?, session_type=?
+            WHERE user_id=?
+        """, (end.isoformat(), session_type, user_id))
+        conn.commit()
     return end
 
 
 def log_payment(user_id, charge_id, payload, stars, minutes):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO payments
-        (user_id, telegram_payment_charge_id, payload, stars, minutes, payment_date)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (user_id, charge_id, payload, stars, minutes, now_iso()))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO payments
+            (user_id, telegram_payment_charge_id, payload, stars, minutes, payment_date)
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (user_id, charge_id, payload, stars, minutes, now_iso()))
+        conn.commit()
 
 
 def payment_exists(charge_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT 1 FROM payments WHERE telegram_payment_charge_id=?",
-        (charge_id,)
-    )
-    result = cur.fetchone()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT 1 FROM payments WHERE telegram_payment_charge_id=?",
+            (charge_id,)
+        )
+        result = cur.fetchone()
     return bool(result)
 
 
 def save_message(user_id, role, content):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO messages (user_id, role, content, created_at)
-        VALUES (?, ?, ?, ?)
-    """, (user_id, role, content, now_iso()))
-    conn.commit()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO messages (user_id, role, content, created_at)
+            VALUES (?, ?, ?, ?)
+        """, (user_id, role, content, now_iso()))
+        conn.commit()
 
 
 def load_history(user_id):
-    conn = db()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT role, content
-        FROM messages
-        WHERE user_id=?
-        ORDER BY id ASC
-    """, (user_id,))
-    rows = cur.fetchall()
-    conn.close()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT role, content
+            FROM messages
+            WHERE user_id=?
+            ORDER BY id ASC
+        """, (user_id,))
+        rows = cur.fetchall()
     return [{"role": r, "content": c} for r, c in rows]
 
 
 def get_stats():
-    conn = db()
-    cur = conn.cursor()
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
 
-    cur.execute("SELECT COUNT(*) FROM users")
-    total_users = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM users")
+        total_users = cur.fetchone()[0]
 
-    cur.execute("""
-        SELECT COUNT(*) FROM users
-        WHERE free_session_start IS NOT NULL
-    """)
-    started_free = cur.fetchone()[0]
+        cur.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE free_session_start IS NOT NULL
+        """)
+        started_free = cur.fetchone()[0]
 
-    cur.execute("""
-        SELECT COUNT(*) FROM users
-        WHERE session_end IS NOT NULL AND session_end > ?
-    """, (now_iso(),))
-    active = cur.fetchone()[0]
+        cur.execute("""
+            SELECT COUNT(*) FROM users
+            WHERE session_end IS NOT NULL AND session_end > ?
+        """, (now_iso(),))
+        active = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM payments")
-    payments = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM payments")
+        payments = cur.fetchone()[0]
 
-    cur.execute("SELECT COALESCE(SUM(stars),0) FROM payments")
-    stars = cur.fetchone()[0]
+        cur.execute("SELECT COALESCE(SUM(stars),0) FROM payments")
+        stars = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM payments WHERE minutes=15")
-    paid15 = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM payments WHERE minutes=15")
+        paid15 = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM payments WHERE minutes=30")
-    paid30 = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM payments WHERE minutes=30")
+        paid30 = cur.fetchone()[0]
 
-    cur.execute("SELECT COUNT(*) FROM messages")
-    messages = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM messages")
+        messages = cur.fetchone()[0]
 
-    today = datetime.now(timezone.utc).date().isoformat()
-    cur.execute("SELECT COUNT(*) FROM users WHERE substr(join_date,1,10)=?", (today,))
-    new_today = cur.fetchone()[0]
+        today = datetime.now(timezone.utc).date().isoformat()
+        cur.execute("SELECT COUNT(*) FROM users WHERE substr(join_date,1,10)=?", (today,))
+        new_today = cur.fetchone()[0]
 
-    conn.close()
     return {
         "total_users": total_users,
         "started_free": started_free,
@@ -617,7 +600,7 @@ async def start_free_session(callback: types.CallbackQuery, state: FSMContext):
         await callback.answer()
         return
 
-    start, end = start_free_session_db(user_id)
+    start_free_session_db(user_id)
     await state.set_state(SessionStates.chatting)
 
     await callback.message.answer(
@@ -656,13 +639,16 @@ async def handle_chat(message: types.Message, state: FSMContext):
 
     save_message(user_id, "user", text)
 
-    history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    history.extend(load_history(user_id))
+    # Защищенное формирование истории для OpenAI API:
+    # 1. Загружаем последние 40 сообщений
+    recent_history = load_history(user_id)[-40:]
 
-    # Не отправляем бесконечную историю в API.
-    # Системный prompt + последние 40 сообщений сохраняют контекст,
-    # не раздувая запрос.
-    history = [history[0]] + history[-40:]
+    # 2. Убеждаемся, что первое сообщение в истории имеет роль 'user',
+    # чтобы избежать ошибки 400 со стороны API.
+    while recent_history and recent_history[0]["role"] != "user":
+        recent_history.pop(0)
+
+    history = [{"role": "system", "content": SYSTEM_PROMPT}] + recent_history
 
     try:
         response = await asyncio.to_thread(
@@ -744,7 +730,6 @@ async def buy_30(callback: types.CallbackQuery):
 
 @dp.pre_checkout_query()
 async def pre_checkout_query_handler(pre_checkout_query: types.PreCheckoutQuery):
-    # Дополнительно проверяем, что payload соответствует нашему тарифу.
     if pre_checkout_query.invoice_payload not in {
         "psy_session_15",
         "psy_session_30",
@@ -764,7 +749,6 @@ async def successful_payment_handler(message: types.Message, state: FSMContext):
     payment = message.successful_payment
     user_id = message.from_user.id
 
-    # Защита от повторной обработки одного платежа.
     if payment_exists(payment.telegram_payment_charge_id):
         await message.answer(
             "Этот платёж уже был обработан. Если доступ не появился, "
@@ -808,7 +792,6 @@ async def successful_payment_handler(message: types.Message, state: FSMContext):
         parse_mode="Markdown",
     )
 
-    # После успешной оплаты отправляем обновлённый транскрипт в поддержку.
     await send_transcript_email_async(
         user_id, f"успешная оплата — {minutes} минут"
     )
