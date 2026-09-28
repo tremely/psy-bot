@@ -89,6 +89,10 @@ class SessionStates(StatesGroup):
     chatting = State()
 
 
+class BroadcastStates(StatesGroup):
+    waiting_for_message = State()
+
+
 # ============================================================
 # DATABASE
 # ============================================================
@@ -469,6 +473,36 @@ async def ensure_user(message):
 
 
 # ============================================================
+# ADMIN BROADCAST
+# ============================================================
+def get_all_user_ids():
+    with sqlite3.connect(DB_PATH) as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT user_id FROM users")
+        return [row[0] for row in cur.fetchall()]
+
+
+async def broadcast_message(text):
+    """Отправляет сообщение всем пользователям, сохранённым в базе."""
+    user_ids = get_all_user_ids()
+    sent = 0
+    failed = 0
+
+    for user_id in user_ids:
+        try:
+            await bot.send_message(user_id, text)
+            sent += 1
+        except Exception:
+            failed += 1
+            logging.exception("Broadcast failed for user %s", user_id)
+
+        # Небольшая пауза, чтобы не упираться в лимиты Telegram.
+        await asyncio.sleep(0.05)
+
+    return len(user_ids), sent, failed
+
+
+# ============================================================
 # COMMANDS / MENU
 # ============================================================
 @dp.message(Command("start"))
@@ -507,7 +541,67 @@ async def cmd_admin(message: types.Message):
         f"⏱ Покупок по 30 минут: **{s['paid30']}**\n\n"
         f"💬 Сообщений в истории: **{s['messages']}**"
     )
-    await message.answer(text, parse_mode="Markdown")
+
+    keyboard = types.InlineKeyboardMarkup(inline_keyboard=[
+        [types.InlineKeyboardButton(
+            text="📢 Отправить сообщение пользователям",
+            callback_data="admin_broadcast"
+        )]
+    ])
+
+    await message.answer(text, reply_markup=keyboard, parse_mode="Markdown")
+
+
+@dp.callback_query(F.data == "admin_broadcast")
+async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Нет доступа.", show_alert=True)
+        return
+
+    await state.set_state(BroadcastStates.waiting_for_message)
+    await callback.message.answer(
+        "📢 **Рассылка пользователям**\n\n"
+        "Отправьте следующим сообщением текст, который нужно разослать "
+        "всем пользователям, которые запускали бота.\n\n"
+        "Для отмены используйте /cancel.",
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@dp.message(Command("cancel"))
+async def admin_broadcast_cancel(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    current_state = await state.get_state()
+    if current_state == BroadcastStates.waiting_for_message.state:
+        await state.clear()
+        await message.answer("❌ Рассылка отменена.")
+
+
+@dp.message(BroadcastStates.waiting_for_message, F.text)
+async def admin_broadcast_send(message: types.Message, state: FSMContext):
+    if message.from_user.id != ADMIN_ID:
+        await state.clear()
+        return
+
+    broadcast_text = message.text.strip()
+    if not broadcast_text:
+        await message.answer("Сообщение пустое. Отправьте текст ещё раз или /cancel.")
+        return
+
+    await state.clear()
+
+    total, sent, failed = await broadcast_message(broadcast_text)
+
+    await message.answer(
+        "📢 **Рассылка завершена.**\n\n"
+        f"👥 Получателей в базе: **{total}**\n"
+        f"✅ Доставлено: **{sent}**\n"
+        f"❌ Не доставлено: **{failed}**",
+        parse_mode="Markdown"
+    )
 
 
 # ============================================================
